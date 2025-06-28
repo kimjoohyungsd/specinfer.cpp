@@ -584,6 +584,7 @@ ggml_tensor * llm_graph_context::build_ffn(
          ggml_tensor * down_b,
          ggml_tensor * down_s,
          ggml_tensor * act_scales,
+         ggml_tensor * R4_hadamard,
      llm_ffn_op_type   type_op,
    llm_ffn_gate_type   type_gate,
                  int   il) const {
@@ -690,8 +691,40 @@ ggml_tensor * llm_graph_context::build_ffn(
         cur = ggml_mul(ctx0, cur, tmp);
         cb(cur, "ffn_gate_par", il);
     }
-
+    // R4 Matrix가 곱해져야 할 자라
     if (down) {
+        // if (Rotated Down Matrix)
+        //      cur=ggml_hadamard_transform(ctx,cur)
+        // printf("R4_hadamard in ffn build function: %p\n",R4_hadamard);
+        if (R4_hadamard)
+        {
+            // printf("In R4_hadamard \n");
+            // float * data = (float*) R4_hadamard->data;
+            // size_t n_elements = ggml_nelements(R4_hadamard);
+            // float scale = sqrt(R4_hadamard->ne[0]);
+            // for (int i2=0;i2<n_elements;i2++)
+            // {
+            //     if (data[i2]*scale != -1 && data[i2]*scale != 1)
+            //     {
+            //         printf("Online R4 doesn't seem to match\n");
+            //     }
+            // }
+            // printf("r4_hadamarid\n");
+
+            const int64_t outer_R4 = R4_hadamard->ne[0];
+            const int64_t inner_R4 = cur->ne[0]/outer_R4;// const int64_t inner_R4 = cur->ne[0] / R4_hadamard->ne[0]; 
+            //1. reshape
+            cur = ggml_reshape_4d(ctx0,cur,inner_R4,outer_R4,cur->ne[1],cur->ne[2]); // llama2의 경우 ne[64,172,sequence_length,batch_size]
+            //2. hadamard_transform
+            cur = ggml_hadamard_transform(ctx0,cur); // output shape [64,172,sequence_length,batch_size]
+            //3. matmul
+            cur = ggml_cont(ctx0,ggml_transpose(ctx0,cur)); // [172,64,sequence_length,batch_size] 1. ggml_transpose(를 진행한다) 실제로는 이것은 그냥 view만 바꾼 함 2. ggml_cont함수를 진행한다=> 결국에는 ggml_compute_forward_dup 연산을 진행한다 3. 
+            cur = ggml_mul_mat(ctx0,R4_hadamard,cur); // output_shape [172,64,sequence_length,batch_size]
+            //4. reshape
+            cur=ggml_reshape_3d(ctx0,cur,cur->ne[0]*cur->ne[1],cur->ne[2],cur->ne[3]);
+            cb(cur,"R4_online",il);
+        }
+
         cur = build_lora_mm(down, cur);
         if (arch == LLM_ARCH_GLM4) {
             // GLM4 seems to have numerical issues with half-precision accumulators

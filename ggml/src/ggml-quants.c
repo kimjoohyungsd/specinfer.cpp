@@ -35,7 +35,7 @@ void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_REST
 
         for (int j = 0; j < qk; j++) {
             const float v = x[i*qk + j];
-            if (amax < fabsf(v)) {
+            if (amax < fabsf(v)) { // Max 값을 찾는다
                 amax = fabsf(v);
                 max  = v;
             }
@@ -47,8 +47,8 @@ void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_REST
         y[i].d = GGML_FP32_TO_FP16(d);
 
         for (int j = 0; j < qk/2; ++j) {
-            const float x0 = x[i*qk + 0    + j]*id;
-            const float x1 = x[i*qk + qk/2 + j]*id;
+            const float x0 = x[i*qk + 0    + j]*id; 
+            const float x1 = x[i*qk + qk/2 + j]*id;// x0보다 16 index 앞의 있는 element를 Quantize한다
 
             const uint8_t xi0 = MIN(15, (int8_t)(x0 + 8.5f));
             const uint8_t xi1 = MIN(15, (int8_t)(x1 + 8.5f));

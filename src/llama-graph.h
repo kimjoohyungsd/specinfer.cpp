@@ -3,6 +3,7 @@
 #include "llama-arch.h"
 #include "llama-hparams.h"
 #include "llama-adapter.h"
+#include "ggml.h"
 
 #include <cstdint>
 #include <vector>
@@ -518,6 +519,7 @@ struct llm_graph_context {
              ggml_tensor * down_b,
              ggml_tensor * down_s,
              ggml_tensor * act_scales,
+             ggml_tensor * R4_hadamard,
          llm_ffn_op_type   type_op,
        llm_ffn_gate_type   type_gate,
                      int   il) const;

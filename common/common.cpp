@@ -1101,6 +1101,7 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.use_mmap        = params.use_mmap;
     mparams.use_mlock       = params.use_mlock;
     mparams.check_tensors   = params.check_tensors;
+    mparams.online_R4       = params.online_R4;
 
     if (params.kv_overrides.empty()) {
         mparams.kv_overrides = NULL;
@@ -1151,6 +1152,8 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.no_perf           = params.no_perf;
     cparams.op_offload        = !params.no_op_offload;
     cparams.swa_full          = params.swa_full;
+
+    cparams.online_R3         = params.online_R3;// online x` transform을 llama_context_params에도 설정을 한다
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;

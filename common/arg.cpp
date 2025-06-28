@@ -2275,6 +2275,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_NO_MMAP"));
     add_opt(common_arg(
+        {"--use-R3"},
+        "apply R3 Online Hadamard Transform during computational process mentioned in Spinquant paper",
+        [](common_params & params) {
+            params.online_R3 = true;
+        }
+    ));
+    add_opt(common_arg(
+        {"--use-R4"},
+        "apply R3 Online Hadamard Transform during computational process mentioned in Spinquant paper",
+        [](common_params & params) {
+            params.online_R4 = true;
+        }
+    ));
+    add_opt(common_arg(
         {"--numa"}, "TYPE",
         "attempt optimizations that help on some NUMA systems\n"
         "- distribute: spread execution evenly over all nodes\n"
@@ -3225,7 +3239,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.vocoder.use_guide_tokens = true;
         }
     ).set_examples({LLAMA_EXAMPLE_TTS, LLAMA_EXAMPLE_SERVER}));
-    add_opt(common_arg(
+    add_opt(common_arg( 
         {"--tts-speaker-file"}, "FNAME",
         "speaker file path for audio generation",
         [](common_params & params, const std::string & value) {

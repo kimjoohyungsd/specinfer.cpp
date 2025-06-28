@@ -983,9 +983,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "CROSS_ENTROPY_LOSS",
     "CROSS_ENTROPY_LOSS_BACK",
     "OPT_STEP_ADAMW",
+    "HADAMARD_TRANSFORM", // For Hadamard Transform
 };
 
-static_assert(GGML_OP_COUNT == 82, "GGML_OP_COUNT != 82");
+static_assert(GGML_OP_COUNT == 83, "GGML_OP_COUNT != 83");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1078,9 +1079,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "cross_entropy_loss(x,y)",
     "cross_entropy_loss_back(x,y)",
     "adamw(x)",
+    "hadamard_transform(x)" // For hadamard Transform
 };
 
-static_assert(GGML_OP_COUNT == 82, "GGML_OP_COUNT != 82");
+static_assert(GGML_OP_COUNT == 83, "GGML_OP_COUNT != 83");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -2833,6 +2835,21 @@ struct ggml_tensor * ggml_mul_mat_id(
     return result;
 }
 
+// ggml_hadamard_transform
+struct ggml_tensor * ggml_hadamard_transform(
+        struct ggml_context * ctx,
+        struct ggml_tensor * a
+)   {
+    GGML_ASSERT(!ggml_is_transposed(a));
+
+    const int64_t ne[4] = {a->ne[0], a->ne[1], a->ne[2], a->ne[3]};
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, ne);
+
+    result->op      = GGML_OP_HADAMARD;
+    result->src[0]  = a;
+
+    return result;
+}
 // ggml_out_prod
 
 static inline bool ggml_can_out_prod(const struct ggml_tensor * t0, const struct ggml_tensor * t1) {
@@ -3148,7 +3165,7 @@ struct ggml_tensor * ggml_reshape_3d(
     GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2);
 
     const int64_t ne[3] = { ne0, ne1, ne2 };
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 3, ne, a, 0);
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 3, ne, a, 0); //  새로운   Tensor를 만들지만 Data type은 이전 tensor의 값을 그대로 가지고 온다
     ggml_format_name(result, "%s (reshaped)", a->name);
 
     result->op     = GGML_OP_RESHAPE;
@@ -3274,13 +3291,14 @@ struct ggml_tensor * ggml_view_4d(
 
 // ggml_permute
 
-struct ggml_tensor * ggml_permute(
+struct ggml_tensor * ggml_permute( // permute에 예시: axis0: 첫번째 축에 어떤한 값이 와야 하는지 axis1: dim1이 어디로 이동해야 하는지 axis2: dim2가 어디로 이동해야 하는지 , axis3: dim3가 어디로 이동해야 하는지
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         int                   axis0,
         int                   axis1,
         int                   axis2,
         int                   axis3) {
+    // 
     GGML_ASSERT(axis0 >= 0 && axis0 < GGML_MAX_DIMS);
     GGML_ASSERT(axis1 >= 0 && axis1 < GGML_MAX_DIMS);
     GGML_ASSERT(axis2 >= 0 && axis2 < GGML_MAX_DIMS);
@@ -3293,12 +3311,14 @@ struct ggml_tensor * ggml_permute(
     GGML_ASSERT(axis1 != axis3);
     GGML_ASSERT(axis2 != axis3);
 
+
     struct ggml_tensor * result = ggml_view_tensor(ctx, a);
     ggml_format_name(result, "%s (permuted)", a->name);
 
     int ne[GGML_MAX_DIMS];
     int nb[GGML_MAX_DIMS];
 
+    // 
     ne[axis0] = a->ne[0];
     ne[axis1] = a->ne[1];
     ne[axis2] = a->ne[2];

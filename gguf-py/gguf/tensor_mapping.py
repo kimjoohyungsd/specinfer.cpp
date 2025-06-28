@@ -71,7 +71,10 @@ class TensorNameMap:
             "head.out",                  # wavtokenizer
             "lm_head",                   # llama4
         ),
-
+        # Online_R4
+        MODEL_TENSOR.ONLINE_R4:(
+            "online_r4",
+        ),
         # Output norm
         MODEL_TENSOR.OUTPUT_NORM: (
             "gpt_neox.final_layer_norm",               # gptneox
@@ -1223,7 +1226,7 @@ class TensorNameMap:
         for tensor, keys in self.mappings_cfg.items():
             if tensor not in MODEL_TENSORS[arch]:
                 continue
-            tensor_name = TENSOR_NAMES[tensor]
+            tensor_name = TENSOR_NAMES[tensor] # Tensor의 Type들의 맞는 자료형들이 있다 self.mapping key: string value: (LLM_TENSOR_ENUM, Tensor_name)
             self.mapping[tensor_name] = (tensor, tensor_name)
             for key in keys:
                 self.mapping[key] = (tensor, tensor_name)

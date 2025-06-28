@@ -512,6 +512,7 @@ llama_model_loader::llama_model_loader(
         if (weights_map.find(tensor_name) != weights_map.end()) {
             throw std::runtime_error(format("invalid model: tensor '%s' is duplicated", ggml_get_name(cur)));
         }
+        // LLAMA_LOG_INFO("%s: tensor_name:%s\n", __func__, tensor_name.c_str());
         n_elements += ggml_nelements(cur);
         n_bytes    += ggml_nbytes(cur);
         weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, meta.get(), cur));

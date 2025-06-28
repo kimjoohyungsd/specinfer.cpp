@@ -1513,9 +1513,10 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     const auto & n_gpu_layers = params.n_gpu_layers;
     const auto & use_mlock    = params.use_mlock;
     const auto & tensor_split = params.tensor_split;
-
+    const auto & online_R4    = params.online_R4;
     const int n_layer = hparams.n_layer;
-
+    
+    
     const bool use_mmap_buffer = true;
 
     LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s)\n", __func__, ml.use_mmap ? "true" : "false");
@@ -1637,7 +1638,14 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         const int64_t n_expert      = hparams.n_expert;
         const int64_t n_expert_used = hparams.n_expert_used;
         const int64_t n_ctx_train   = hparams.n_ctx_train;
-
+        int64_t     online_K;
+        if (online_R4)
+        {
+            if (n_ff==11008)
+            {
+                online_K=172;
+            }
+        }
         if (n_expert > 0 && hparams.n_expert_used == 0) {
             throw std::runtime_error("model has expert layers but no expert layers are used");
         }
@@ -1800,7 +1808,10 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     if (output == NULL) {
                         output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
                     }
-
+                    if (online_R4)
+                    {
+                        R4_hadamard=create_tensor(tn(LLM_TENSOR_ONLINE_R4,"weight"),{online_K,online_K},0);
+                    }
                     for (int i = 0; i < n_layer; ++i) {
                         auto & layer = layers[i];
 
@@ -4453,7 +4464,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             pimpl->mappings.emplace_back(std::move(mapping));
         }
     }
-
+   
     return true;
 }
 
@@ -4732,7 +4743,7 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
 struct llm_build_llama : public llm_graph_context {
     llm_build_llama(const llama_model & model, const llm_graph_params & params, ggml_cgraph * gf) : llm_graph_context(params) {
         const int64_t n_embd_head = hparams.n_embd_head_v;
-
+        const bool online_R3     = cparams.online_R3;
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
         GGML_ASSERT(n_embd_head == hparams.n_rot);
 
@@ -4800,6 +4811,11 @@ struct llm_build_llama : public llm_graph_context {
                         ext_factor, attn_factor, beta_fast, beta_slow
                         );
 
+                if (online_R3)
+                {
+                    Qcur=ggml_hadamard_transform(ctx0,Qcur);
+                    Kcur=ggml_hadamard_transform(ctx0,Kcur);
+                }
                 cb(Qcur, "Qcur", il);
                 cb(Kcur, "Kcur", il);
                 cb(Vcur, "Vcur", il);
@@ -4827,12 +4843,13 @@ struct llm_build_llama : public llm_graph_context {
                         model.layers[il].ffn_norm, NULL,
                         LLM_NORM_RMS, il);
                 cb(cur, "ffn_norm", il);
-
+                // printf("R4_hadamard outside ffn build function: %p\n",model.R4_hadamard);
                 cur = build_ffn(cur,
                         model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   NULL,
                         model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                        NULL,
+                        NULL, //activation scales의 값이다
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             } else {
@@ -5006,6 +5023,7 @@ struct llm_build_llama_iswa : public llm_graph_context {
                         model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             } else {
@@ -5032,6 +5050,7 @@ struct llm_build_llama_iswa : public llm_graph_context {
                     model.layers[il].ffn_gate_shexp, NULL, NULL,
                     model.layers[il].ffn_down_shexp, NULL, NULL,
                     NULL,
+                    model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(shexp_out, "ffn_moe_shexp", il);
 
@@ -5190,6 +5209,7 @@ struct llm_build_deci : public llm_graph_context {
                         model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -5313,6 +5333,7 @@ struct llm_build_baichuan : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -5428,6 +5449,7 @@ struct llm_build_xverse : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -5548,6 +5570,7 @@ struct llm_build_falcon : public llm_graph_context {
                         NULL,                      NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
             }
@@ -5950,6 +5973,7 @@ struct llm_build_starcoder : public llm_graph_context {
                         NULL,                      NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
             }
@@ -6047,6 +6071,7 @@ struct llm_build_refact : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -6225,6 +6250,7 @@ struct llm_build_bert : public llm_graph_context {
                         NULL,                      NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
             } else if (model.arch == LLM_ARCH_JINA_BERT_V2) {
@@ -6233,6 +6259,7 @@ struct llm_build_bert : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         NULL,
+                        model.R4_hadamard,
                         model.layers[il].ffn_gate ? LLM_FFN_GELU : LLM_FFN_GEGLU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             } else {
@@ -6241,6 +6268,7 @@ struct llm_build_bert : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -6353,6 +6381,7 @@ struct llm_build_neo_bert : public llm_graph_context {
                     NULL, NULL, NULL, NULL, NULL,
                     model.layers[il].ffn_down,
                     NULL, NULL, NULL,
+                    model.R4_hadamard,
                     LLM_FFN_SWIGLU, LLM_FFN_SEQ, il);
 
             // attentions bypass the intermediate layer
@@ -6451,6 +6480,7 @@ struct llm_build_bloom : public llm_graph_context {
                         NULL,                      NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
             }
@@ -6591,6 +6621,7 @@ struct llm_build_mpt : public llm_graph_context {
                         NULL,                      NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         model.layers[il].ffn_act,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
             }
@@ -6742,6 +6773,7 @@ struct llm_build_stablelm : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -6859,6 +6891,7 @@ struct llm_build_qwen : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -6978,6 +7011,7 @@ struct llm_build_qwen2 : public llm_graph_context {
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
+                    model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -7099,6 +7133,7 @@ struct llm_build_qwen2vl : public llm_graph_context {
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
+                    model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -7249,6 +7284,7 @@ struct llm_build_qwen2moe : public llm_graph_context {
                         model.layers[il].ffn_gate_shexp, NULL, NULL,
                         model.layers[il].ffn_down_shexp, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur_ffn, "ffn_shexp", il);
 
@@ -7379,6 +7415,7 @@ struct llm_build_qwen3 : public llm_graph_context {
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
+                    model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -7634,6 +7671,7 @@ struct llm_build_phi2 : public llm_graph_context {
                         NULL,                      NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(ffn_output, "ffn_out", il);
             }
@@ -7778,6 +7816,7 @@ struct llm_build_phi3 : public llm_graph_context {
                         NULL,                      NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SWIGLU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
             } else {
@@ -7909,6 +7948,7 @@ struct llm_build_plamo : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -8022,6 +8062,7 @@ struct llm_build_gpt2 : public llm_graph_context {
                         NULL,                      NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
             }
@@ -8138,6 +8179,7 @@ struct llm_build_codeshell : public llm_graph_context {
                         NULL,                      NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
             }
@@ -8264,6 +8306,7 @@ struct llm_build_orion : public llm_graph_context {
                 model.layers[il].ffn_gate, NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
                 NULL,
+               model.R4_hadamard,
                 LLM_FFN_SILU, LLM_FFN_PAR, il);
         cb(cur, "ffn_out", il);
 
@@ -8391,6 +8434,7 @@ struct llm_build_internlm2 : public llm_graph_context {
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
+                    model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -8594,6 +8638,7 @@ struct llm_build_minicpm3 : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -8719,6 +8764,7 @@ struct llm_build_gemma : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -8839,6 +8885,7 @@ struct llm_build_gemma2_iswa : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -8981,6 +9028,7 @@ struct llm_build_gemma3_iswa : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -9116,6 +9164,7 @@ struct llm_build_starcoder2 : public llm_graph_context {
                     NULL,                      NULL,                        NULL,
                     model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                     NULL,
+                    model.R4_hadamard,
                     LLM_FFN_GELU, LLM_FFN_SEQ, il);
             cb(cur, "ffn_out", il);
 
@@ -9443,6 +9492,7 @@ struct llm_build_command_r : public llm_graph_context {
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
                         NULL,
+                        model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -9574,7 +9624,7 @@ struct llm_build_cohere2_iswa : public llm_graph_context {
             // feed-forward network
             {
                 cur = build_ffn(ffn_inp, model.layers[il].ffn_up, NULL, NULL, model.layers[il].ffn_gate,
-                        NULL, NULL, model.layers[il].ffn_down, NULL, NULL, NULL, LLM_FFN_SILU, LLM_FFN_PAR,
+                        NULL, NULL, model.layers[il].ffn_down, NULL, NULL, NULL, model.R4_hadamard,LLM_FFN_SILU, LLM_FFN_PAR,
                         il);
                 cb(cur, "ffn_out", il);
             }
@@ -9713,6 +9763,7 @@ struct llm_build_olmo : public llm_graph_context {
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
+                   model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -9832,7 +9883,7 @@ struct llm_build_olmo2 : public llm_graph_context {
                     model.layers[il].ffn_up,   NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -10099,7 +10150,7 @@ struct llm_build_openelm : public llm_graph_context {
                         model.layers[il].ffn_up,   NULL, NULL,
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
-                        NULL,
+                        NULL,model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -10216,7 +10267,7 @@ struct llm_build_gptneox : public llm_graph_context {
                         model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   NULL,
                         NULL,                      NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                        NULL,
+                        NULL,model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
 
@@ -10248,7 +10299,7 @@ struct llm_build_gptneox : public llm_graph_context {
                         model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   NULL,
                         NULL,                      NULL,                        NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_GELU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
 
@@ -10362,7 +10413,7 @@ struct llm_build_arctic : public llm_graph_context {
                     model.layers[il].ffn_up,   NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -10518,7 +10569,7 @@ struct llm_build_deepseek : public llm_graph_context {
                         model.layers[il].ffn_up,   NULL, NULL,
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             } else {
@@ -10543,7 +10594,7 @@ struct llm_build_deepseek : public llm_graph_context {
                             model.layers[il].ffn_up_shexp,   NULL, NULL,
                             model.layers[il].ffn_gate_shexp, NULL, NULL,
                             model.layers[il].ffn_down_shexp, NULL, NULL,
-                            NULL,
+                            NULL, model.R4_hadamard,
                             LLM_FFN_SILU, LLM_FFN_PAR, il);
                     cb(ffn_shexp, "ffn_shexp", il);
 
@@ -10781,7 +10832,7 @@ struct llm_build_deepseek2 : public llm_graph_context {
                         model.layers[il].ffn_up,   NULL, NULL,
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             } else {
@@ -10806,7 +10857,7 @@ struct llm_build_deepseek2 : public llm_graph_context {
                             model.layers[il].ffn_up_shexp,   NULL, NULL,
                             model.layers[il].ffn_gate_shexp, NULL, NULL,
                             model.layers[il].ffn_down_shexp, NULL, NULL,
-                            NULL,
+                            NULL, model.R4_hadamard,
                             LLM_FFN_SILU, LLM_FFN_PAR, il);
                     cb(ffn_shexp, "ffn_shexp", il);
 
@@ -10961,7 +11012,7 @@ struct llm_build_bitnet : public llm_graph_context {
                     model.layers[il].ffn_up,   NULL, model.layers[il].ffn_up_scale,
                     model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_scale,
                     NULL,                      NULL, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_sub_out", il);
 
@@ -11073,7 +11124,7 @@ struct llm_build_t5_enc : public llm_graph_context {
                         model.layers[il].ffn_up_enc,   NULL, NULL,
                         model.layers[il].ffn_gate_enc, NULL, NULL,
                         model.layers[il].ffn_down_enc, NULL, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         model.layers[il].ffn_gate_enc ? LLM_FFN_GELU : LLM_FFN_RELU,
                         model.layers[il].ffn_gate_enc ? LLM_FFN_PAR  : LLM_FFN_SEQ,
                         il);
@@ -11238,7 +11289,7 @@ struct llm_build_t5_dec : public llm_graph_context {
                         model.layers[il].ffn_up,   NULL, NULL,
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         model.layers[il].ffn_gate_enc ? LLM_FFN_GELU : LLM_FFN_RELU,
                         model.layers[il].ffn_gate_enc ? LLM_FFN_PAR : LLM_FFN_SEQ,
                         il);
@@ -11344,7 +11395,7 @@ struct llm_build_jais : public llm_graph_context {
                         model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   NULL,
                         model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             }
@@ -11476,7 +11527,7 @@ struct llm_build_chatglm : public llm_graph_context {
                         model.layers[il].ffn_up,   NULL, NULL,
                         NULL,                      NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SWIGLU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
 
@@ -11618,7 +11669,7 @@ struct llm_build_glm4 : public llm_graph_context {
                         model.layers[il].ffn_up,   NULL, NULL,
                         NULL,                      NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SWIGLU, LLM_FFN_SEQ, il);
                 cb(cur, "ffn_out", il);
 
@@ -11751,7 +11802,7 @@ struct llm_build_nemotron : public llm_graph_context {
                     model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   NULL,
                     NULL,                      NULL,                        NULL,
                     model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_RELU_SQR, LLM_FFN_SEQ, il);
 
             cur = ggml_add(ctx0, cur, ffn_inp);
@@ -11881,7 +11932,7 @@ struct llm_build_exaone : public llm_graph_context {
                     model.layers[il].ffn_up,   NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -12275,7 +12326,7 @@ struct llm_build_rwkv6qwen2 : public llm_build_rwkv6_base {
                     model.layers[il].ffn_up,   NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -12620,7 +12671,7 @@ struct llm_build_arwkv7 : public llm_build_rwkv7_base {
                     model.layers[il].ffn_up,   NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -12762,7 +12813,7 @@ struct llm_build_granite : public llm_graph_context {
                         model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   NULL,
                         model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
 
@@ -12792,7 +12843,7 @@ struct llm_build_granite : public llm_graph_context {
                         model.layers[il].ffn_up_shexp,   NULL, NULL,
                         model.layers[il].ffn_gate_shexp, NULL, NULL,
                         model.layers[il].ffn_down_shexp, NULL, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                     cb(ffn_shexp, "ffn_shexp", il);
 
@@ -12965,7 +13016,7 @@ struct llm_build_chameleon : public llm_graph_context {
                     model.layers[il].ffn_up,   NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
 
@@ -13140,7 +13191,7 @@ struct llm_build_wavtokenizer_dec : public llm_graph_context {
                     layer.pw1, layer.pw1_b, NULL,
                     NULL,      NULL,        NULL,
                     layer.pw2, layer.pw2_b, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_GELU, LLM_FFN_SEQ, il);
 
             cur = ggml_mul(ctx0, cur, layer.gamma);
@@ -13312,7 +13363,7 @@ struct llm_build_plm : public llm_graph_context {
                     model.layers[il].ffn_up,   NULL, NULL,
                     NULL, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_RELU_SQR, LLM_FFN_SEQ, il);
             cb(cur, "ffn_out", il);
 
@@ -13451,7 +13502,7 @@ struct llm_build_bailingmoe : public llm_graph_context {
                         model.layers[il].ffn_up_shexp,   NULL, NULL,
                         model.layers[il].ffn_gate_shexp, NULL, NULL,
                         model.layers[il].ffn_down_shexp, NULL, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(ffn_shexp, "ffn_shexp", il);
 
@@ -13577,7 +13628,7 @@ struct llm_build_dots1 : public llm_graph_context {
                         model.layers[il].ffn_up,   NULL, NULL,
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             } else {
@@ -13600,7 +13651,7 @@ struct llm_build_dots1 : public llm_graph_context {
                             model.layers[il].ffn_up_shexp,   NULL, NULL,
                             model.layers[il].ffn_gate_shexp, NULL, NULL,
                             model.layers[il].ffn_down_shexp, NULL, NULL,
-                            NULL,
+                            NULL, model.R4_hadamard,
                             LLM_FFN_SILU, LLM_FFN_PAR, il);
                     cb(ffn_shexp, "ffn_shexp", il);
 
@@ -13739,7 +13790,7 @@ struct llm_build_arcee : public llm_graph_context {
                     model.layers[il].ffn_up,   NULL, NULL,
                     NULL,                      NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
+                    NULL, model.R4_hadamard,
                     LLM_FFN_RELU_SQR, LLM_FFN_SEQ, il);
             cb(cur, "ffn_out", il);
 
@@ -13874,7 +13925,7 @@ struct llm_build_eagle : public llm_graph_context {
                         model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   NULL,
                         model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                         model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                        NULL,
+                        NULL, model.R4_hadamard,
                         LLM_FFN_SILU, LLM_FFN_PAR, il);
                 cb(cur, "ffn_out", il);
             } else {
@@ -14331,6 +14382,7 @@ llama_model_params llama_model_default_params() {
         /*.use_mmap                    =*/ true,
         /*.use_mlock                   =*/ false,
         /*.check_tensors               =*/ false,
+        /*.online_R4                   =*/ false,
     };
 
 #ifdef GGML_USE_METAL

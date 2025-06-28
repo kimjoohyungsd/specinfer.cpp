@@ -327,6 +327,8 @@ extern "C" {
         bool use_mmap;      // use mmap if possible
         bool use_mlock;     // force system to keep model in RAM
         bool check_tensors; // validate model tensor data
+
+        bool online_R4;     // For R4 Hadamard rotation mentioned in SpinQuant paper
     };
 
     // NOTE: changing the default values of parameters marked as [EXPERIMENTAL] may cause crashes or incorrect results in certain configurations
@@ -374,6 +376,9 @@ extern "C" {
         bool swa_full;    // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
                           // NOTE: setting to false when n_seq_max > 1 can cause bad performance in some cases
                           //       ref: https://github.com/ggml-org/llama.cpp/pull/13845#issuecomment-2924800573
+        bool online_R3;
+                          // use online-hadamard transform as mentioned in (https://arxiv.org/pdf/2405.16406)
+                          // Initial value is false and manually activating this option is required 
     };
 
     // model quantization parameters

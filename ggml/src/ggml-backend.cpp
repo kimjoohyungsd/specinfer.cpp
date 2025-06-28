@@ -1565,9 +1565,9 @@ bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph *
 bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
     GGML_ASSERT((int)sched->hash_set.size >= graph->n_nodes + graph->n_leafs);
 
-    ggml_backend_sched_split_graph(sched, graph);
+    ggml_backend_sched_split_graph(sched, graph); // 1. graph 단위로 Split을 진행한다
 
-    if (!ggml_backend_sched_alloc_splits(sched)) {
+    if (!ggml_backend_sched_alloc_splits(sched)) { // 2. split 된것에 맞게 allocation을 진행한다
         return false;
     }
 

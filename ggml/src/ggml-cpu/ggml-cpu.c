@@ -523,7 +523,7 @@ static struct ggml_state g_state = {0};
 
 void ggml_barrier(struct ggml_threadpool * tp) {
     int n_threads = atomic_load_explicit(&tp->n_threads_cur, memory_order_relaxed);
-    if (n_threads == 1) {
+    if (n_threads == 1) { 
         return;
     }
 
@@ -1350,7 +1350,7 @@ UseGgmlGemm1:;
             }
         }
     #else
-        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+        for (int64_t i13 = 0; i13 < ne13; ++i13) { // Activation을 data type의 맞게 Quantization 하는 함수
             for (int64_t i12 = 0; i12 < ne12; ++i12) {
                 for (int64_t i11 = 0; i11 < ne11; ++i11) {
                     size_t bs = ggml_blck_size(vec_dot_type);
@@ -1369,7 +1369,6 @@ UseGgmlGemm1:;
         // Every thread starts at ith, so the first unprocessed chunk is nth.  This save a bit of coordination right at the start.
         atomic_store_explicit(&params->threadpool->current_chunk, nth, memory_order_relaxed);
     }
-
     ggml_barrier(params->threadpool);
 
 #if GGML_USE_LLAMAFILE
@@ -1424,11 +1423,13 @@ UseGgmlGemm2:;
         nchunk0 = nr0 > nr1 ? nth : 1; // parallelize by src0 rows
         nchunk1 = nr0 > nr1 ? 1 : nth; // parallelize by src1 rows
     }
+    // chunk size를 바탕으로 output의 각 Dimension 방향으로 chunk의 개수를 구한다
 
-    // The number of elements in each chunk
+    // The number of elements in each chunk (각 chunk의 크기)
     const int64_t dr0 = (nr0 + nchunk0 - 1) / nchunk0;
     const int64_t dr1 = (nr1 + nchunk1 - 1) / nchunk1;
 
+    
     // The first chunk comes from our thread_id, the rest will get auto-assigned.
     int current_chunk = ith;
 
@@ -1720,6 +1721,131 @@ static void ggml_compute_forward_mul_mat_id(
     }
 }
 
+// Hadamard 연산을 위한 커널을 구현하는 부분
+static void ggml_compute_forward_hadamard_transform(struct ggml_compute_params * params, struct ggml_tensor * dst) {
+    const struct ggml_tensor * src0 = dst->src[0];
+
+    GGML_TENSOR_UNARY_OP_LOCALS
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+    
+    GGML_ASSERT(ne0 == ne00);
+    GGML_ASSERT(ne1 == ne01);
+    GGML_ASSERT(ne2 == ne02);
+    GGML_ASSERT(ne3 == ne03);
+
+    // we don't support permuted src0
+    GGML_ASSERT(nb00 == ggml_type_size(src0->type));
+
+    // Src0 should be a fp32 type
+    GGML_ASSERT(nb00 == sizeof(float));
+
+    // dst cannot be transposed or permuted
+    GGML_ASSERT(nb0 == sizeof(float));
+    GGML_ASSERT(nb0 <= nb1);
+    GGML_ASSERT(nb1 <= nb2);
+    GGML_ASSERT(nb2 <= nb3);
+
+
+    const size_t row_size = ggml_row_size(src0->type,ne00);
+    const int64_t nr1 = ne1*ne2*ne3;
+
+   
+    // if(ith == 0)
+    // {
+    //     memcpy(dst->data,src0->data,src0_size);
+    // }  
+     
+    if (ith != 0 && nr1 ==1 )
+    {
+        return; 
+    }
+    else
+    {
+        if (ith ==0)
+        {
+            memcpy(dst->data,src0->data,ggml_nbytes(src0));
+            atomic_store_explicit(&params->threadpool->current_chunk, nth, memory_order_relaxed);
+        }
+        ggml_barrier(params->threadpool);
+    }
+    
+    // int chunk_size = 16;
+    
+    // if (ne00 == 1 || nr1 == 1) {
+    //     chunk_size = 64;
+    // }
+    // // printf("online hadamard transform executing\n");
+    // // if (dst->data == NULL)
+    // //     printf("dst->data has been set to NULL\n");
+    // // else 
+    // //     printf("dst->data: %p \n",dst->data);
+
+    // int64_t nchunk0 = (ne00 + chunk_size - 1) / chunk_size;
+    // int64_t nchunk1 = (nr1 + chunk_size -1) / chunk_size;
+
+    // const char *src0_row;
+    
+    int current_chunk = ith;
+    float * dst_row;
+
+    if (ne00 != 0 && ((ne00 & (ne00 - 1)) == 0)) {// Case 1: Power of 2인경우 (R3 rotation을 적용하는 경우)
+        float scale = 1.0f/sqrtf((float) ne00);
+
+        while (current_chunk<nr1)
+        {
+
+            // src0_row=(const char *) src0->data + ((i1)*row_size);
+                dst_row =(float*)((char*)dst->data + (current_chunk)*nb1);
+                int64_t h=1;
+
+                while (h<ne00)
+                {
+                    for (int i2 = 0; i2 < ne00; i2 +=h*2)
+                    {
+                        for(int i3=i2;i3<i2+h;i3++)
+                        {
+                            // float x = *((float*)(src0_row+(i3)*nb00));
+                            // float y = *((float*)(src0_row+(i3+h)*nb00));
+                            float x = dst_row[i3];
+                            float y = dst_row[i3+h];
+
+                            dst_row[i3] = x + y;
+                            dst_row[i3+h] = x - y;
+                        }
+                    }
+
+                    h*=2;
+                    
+                }
+
+            // normalization을 적용하는 부분
+                for (int i=0;i<ne00;i++)
+                {
+                    dst_row[i] *= scale; 
+                }
+       
+            if (nth >= nr1) {
+                break;
+            }
+            current_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
+
+        }
+        
+
+
+    }
+    
+    else { // Case 2: Power of 2가 아닌 경우 (R4 Hadamard를 적용하는 경우)
+        printf("Not defined for Fast Hadamard Transform function for vector whose dimension is not a square root of 2\n");
+
+    }
+    // printf("Hadamard Transform finished\n");
+
+
+
+} 
 /////////////////////////////////
 
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
@@ -2069,6 +2195,11 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                 ggml_compute_forward_opt_step_adamw(params, tensor);
             }
             break;
+        case GGML_OP_HADAMARD:
+            {
+                ggml_compute_forward_hadamard_transform(params,tensor);
+            }
+            break;
         case GGML_OP_NONE:
             {
                 // nop
@@ -2236,6 +2367,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
         case GGML_OP_OUT_PROD:
+            {
+                n_tasks = n_threads;
+            } break;
+        case GGML_OP_HADAMARD:
             {
                 n_tasks = n_threads;
             } break;
@@ -2756,6 +2891,10 @@ struct ggml_cplan ggml_graph_plan(
                         // atomic_current_chunk
                         cur += CACHE_LINE_SIZE*n_as + CACHE_LINE_SIZE;
                     } break;
+                case GGML_OP_HADAMARD:
+                    {   
+                        cur=ggml_row_size(node->type, node->ne[0])*node->ne[1]*node->ne[2]*node->ne[3];
+                    } break;
                 case GGML_OP_OUT_PROD:
                     {
                         if (ggml_is_quantized(node->src[0]->type)) {
@@ -2878,8 +3017,9 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
 
     for (int node_n = 0; node_n < cgraph->n_nodes && atomic_load_explicit(&tp->abort, memory_order_relaxed) != node_n; node_n++) {
         struct ggml_tensor * node = cgraph->nodes[node_n];
-
+ 
         ggml_compute_forward(&params, node);
+
 
         if (state->ith == 0 && cplan->abort_callback &&
                 cplan->abort_callback(cplan->abort_callback_data)) {
@@ -2983,7 +3123,7 @@ static thread_ret_t ggml_graph_compute_secondary_thread(void* data) {
 
     while (true) {
         // Check if we need to sleep
-        while (threadpool->pause) {
+        while (threadpool->pause) { 
             GGML_PRINT_DEBUG("thread #%d inside pause loop\n", state->ith);
             ggml_mutex_lock_shared(&threadpool->mutex);
             if (threadpool->pause) {
@@ -2999,7 +3139,7 @@ static thread_ret_t ggml_graph_compute_secondary_thread(void* data) {
         // Check if there is new work
         // The main thread is the only one that can dispatch new work
 
-        ggml_graph_compute_check_for_work(state);
+        ggml_graph_compute_check_for_work(state); // 현재 실행이 필요한 일이 있는지 check한다
         if (state->pending) {
             state->pending = false;
 
@@ -3015,7 +3155,7 @@ static void ggml_graph_compute_kickoff(struct ggml_threadpool * threadpool, int 
 {
     // Always take the mutex here because the worker threads are doing hybrid poll/wait
 
-    ggml_mutex_lock(&threadpool->mutex);
+    ggml_mutex_lock(&threadpool->mutex); // Mutex의 lock을 걸어둔다
 
     GGML_PRINT_DEBUG("threadpool: n_threads_cur %d n_threads %d\n", threadpool->n_threads_cur, n_threads);
 
@@ -3132,7 +3272,7 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
         disposable_threadpool = true;
 
         struct ggml_threadpool_params ttp = ggml_threadpool_params_default(n_threads);
-        threadpool = ggml_threadpool_new_impl(&ttp, cgraph, cplan);
+        threadpool = ggml_threadpool_new_impl(&ttp, cgraph, cplan); //1. threadpool을 만든다
     } else {
         // Reset some of the parameters that need resetting
         // No worker threads should be accessing the parameters below at this stage
@@ -3167,10 +3307,10 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
     }
 
     // Kick all threads to start the new graph
-    ggml_graph_compute_kickoff(threadpool, n_threads);
+    ggml_graph_compute_kickoff(threadpool, n_threads); // 2. 모든 thread가 시작하게 만든다
 
     // This is a work thread too
-    ggml_graph_compute_thread(&threadpool->workers[0]);
+    ggml_graph_compute_thread(&threadpool->workers[0]); // 3. Main thread도 연산을 실행한다
 #endif
 
     // don't leave affinity set on the main thread

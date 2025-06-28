@@ -316,6 +316,9 @@ struct llama_layer {
     struct ggml_tensor * ffn_up_scale   = nullptr;
     struct ggml_tensor * ffn_down_scale = nullptr;
 
+    
+    
+
     struct llama_layer_posnet posnet;
 
     struct llama_layer_convnext convnext;
@@ -356,6 +359,10 @@ struct llama_model {
     struct ggml_tensor * conv1d   = nullptr;
     struct ggml_tensor * conv1d_b = nullptr;
 
+
+    // Hadamard Matrix for non [pow(2),pow(2)] shape Matrix for R4
+    struct ggml_tensor *R4_hadamard     = nullptr;
+    
     std::vector<llama_layer> layers;
 
     llama_model_params params;

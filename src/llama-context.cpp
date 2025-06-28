@@ -47,6 +47,9 @@ llama_context::llama_context(
     cparams.pooling_type     = params.pooling_type;
     cparams.warmup           = false;
 
+    cparams.online_R3       = params.online_R3; // Online hadamard를 하는 부분을 추가한다
+    // cparams.online_R4       = params.online_R4;
+    
     cparams.n_ctx            = params.n_ctx           == 0    ? hparams.n_ctx_train           : params.n_ctx;
     cparams.rope_freq_base   = params.rope_freq_base  == 0.0f ? hparams.rope_freq_base_train  : params.rope_freq_base;
     cparams.rope_freq_scale  = params.rope_freq_scale == 0.0f ? hparams.rope_freq_scale_train : params.rope_freq_scale;
@@ -692,7 +695,8 @@ llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, 
         return nullptr;
     }
 
-    auto res = graph_build(ctx_compute.get(), gf, ubatch, gtype, mstate);
+    auto res = graph_build(ctx_compute.get(), gf, ubatch, gtype, mstate); // graph를 build한다
+    // ggml_graph_print(gf);
     if (!res) {
         LLAMA_LOG_ERROR("%s: failed to build graph\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -701,7 +705,7 @@ llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, 
 
     // LLAMA_LOG_INFO("graph build time: %.3f ms (%d nodes, %d leafs)\n", (ggml_time_us() - t_start_us)/1000.0, gf->n_nodes, gf->n_leafs);
 
-    if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
+    if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) { // scheduler를 각 backend에 맞게 allocate한다
         LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
         ret = GGML_STATUS_ALLOC_FAILED;
         return nullptr;
@@ -941,6 +945,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     // when computing embeddings, all tokens are output
     const bool embd_all = cparams.embeddings;
 
+    
     if (!batch_allocr->init(batch_inp, model.vocab, memory.get(), embd_all)) {
         LLAMA_LOG_ERROR("%s: failed to initialize batch\n", __func__);
         return -1;
@@ -1752,7 +1757,7 @@ ggml_status llama_context::graph_compute(
         set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
     }
 
-    auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
+    auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf); // 실제 여러 Backend에서 Asynchronous 하게 연산이 진행되는 함수
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
     }
@@ -2562,6 +2567,7 @@ llama_context_params llama_context_default_params() {
         /*.no_perf                     =*/ true,
         /*.op_offload                  =*/ true,
         /*.swa_full                    =*/ true,
+        /*online_hadamard              =*/ false
     };
 
     return result;
