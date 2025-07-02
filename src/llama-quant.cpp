@@ -404,8 +404,7 @@ static ggml_type llama_tensor_get_type(quantize_state_impl & qs, ggml_type new_t
             case GGML_TYPE_Q4_K:   new_type = GGML_TYPE_Q5_0;   break;
             case GGML_TYPE_Q5_K:   new_type = GGML_TYPE_Q5_1;   break;
             case GGML_TYPE_Q6_K:   new_type = GGML_TYPE_Q8_0;   break;
-            // default: throw std::runtime_error("\nUnsupported tensor size encountered\n");
-            LLAMA_LOG_WARN(" Unable to Quantize this tensor: %s for type: %s",tensor->name,ggml_type_name(new_type) );
+            default: throw std::runtime_error("\nUnsupported tensor size encountered\n");
         }
         if (tensor->ne[0] % ggml_blck_size(new_type) != 0) {
             new_type = GGML_TYPE_F16;
@@ -749,6 +748,9 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
         // do not quantize norm tensors
         quantize &= name.find("_norm.weight") == std::string::npos;
+
+        // do not quantize online R4 Matrix
+        quantize &= name.find("online_r4.weight") == std::string::npos;
 
         quantize &= params->quantize_output_tensor || name != "output.weight";
         quantize &= !params->only_copy;

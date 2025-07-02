@@ -719,7 +719,10 @@ ggml_tensor * llm_graph_context::build_ffn(
             cur = ggml_hadamard_transform(ctx0,cur); // output shape [64,172,sequence_length,batch_size]
             //3. matmul
             cur = ggml_cont(ctx0,ggml_transpose(ctx0,cur)); // [172,64,sequence_length,batch_size] 1. ggml_transpose(를 진행한다) 실제로는 이것은 그냥 view만 바꾼 함 2. ggml_cont함수를 진행한다=> 결국에는 ggml_compute_forward_dup 연산을 진행한다 3. 
-            cur = ggml_mul_mat(ctx0,R4_hadamard,cur); // output_shape [172,64,sequence_length,batch_size]
+            // cur = ggml_mul_mat(ctx0,R4_hadamard,cur); // output_shape [172,64,sequence_length,batch_size] => 나와야 하는 Shape [64,172,sequence_length,batch_size] // 이 부분 바꿔야 함 
+            // cur = ggml_cont(ctx0,ggml_transpose(ctx0,cur)); // Output_shape [64,172,sequence_length,batch_size]
+            
+            cur = ggml_mul_mat_hadamard(ctx0,R4_hadamard,cur); // Hadamard shape[172,172] cur shape [172,64,seq,batch] output_shape [64,172,seq,batch]
             //4. reshape
             cur=ggml_reshape_3d(ctx0,cur,cur->ne[0]*cur->ne[1],cur->ne[2],cur->ne[3]);
             cb(cur,"R4_online",il);

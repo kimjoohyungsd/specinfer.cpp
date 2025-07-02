@@ -518,6 +518,8 @@ extern "C" {
         GGML_OP_CROSS_ENTROPY_LOSS_BACK,
         GGML_OP_OPT_STEP_ADAMW,
         GGML_OP_HADAMARD, // HADAMARD연산을 추가하는 부분
+        GGML_OP_MUL_MAT_HADAMARD, // R4 연산을 위한 HADAMARD  함수 구현 부분
+        
         GGML_OP_COUNT,
     };
 
@@ -1166,6 +1168,11 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a);
 
+    GGML_API struct ggml_tensor * ggml_mul_mat_hadamard(
+             struct ggml_context *ctx,
+             struct ggml_tensor *a,
+             struct ggml_tensor *b
+    );
     // A: m columns, n rows,
     // B: p columns, n rows,
     // result is m columns, p rows

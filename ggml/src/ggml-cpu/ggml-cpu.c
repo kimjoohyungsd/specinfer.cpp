@@ -1314,7 +1314,7 @@ static void ggml_compute_forward_mul_mat(
                 if (!llamafile_sgemm(params,
                                      ne01, ne11, ne00/ggml_blck_size(src0->type),
                                      (const char *)src0->data + i12/r2*nb02 + i13/r3*nb03,
-                                     nb01/ggml_type_size(src0->type),
+                                     nb01/ggml_type_size(src0->type),          
                                      (const char *)src1->data + i12*nb12 + i13*nb13,
                                      nb11/ggml_type_size(src1->type),
                                      (char *)dst->data + i12*nb2 + i13*nb3,
@@ -1401,17 +1401,17 @@ UseGgmlGemm2:;
     // This is the size of the rest of the dimensions of the result
     const int64_t nr1 = ne1 * ne2 * ne3;
 
-    // Now select a reasonable chunk size.
+    // Now select a reasonable chunk size. (각 chunk의 크기)
     int chunk_size = 16;
 
-    // We need to step up the size if it's small
+    // We need to step up the size if it's small 
     if (nr0 == 1 || nr1 == 1) {
         chunk_size = 64;
     }
 
     // distribute the work across the inner or outer loop based on which one is larger
     // The number of chunks in the 0/1 dim.
-    // CEIL(nr0/chunk_size)
+    // CEIL(nr0/chunk_size) (각 방향으로의 Chunk의 개수)
     int64_t nchunk0 = (nr0 + chunk_size - 1) / chunk_size;
     int64_t nchunk1 = (nr1 + chunk_size - 1) / chunk_size;
 
@@ -1846,6 +1846,266 @@ static void ggml_compute_forward_hadamard_transform(struct ggml_compute_params *
 
 
 } 
+
+static void ggml_compute_forward_mul_mat_hadamard_one_chunk(
+    const struct ggml_compute_params * params,
+    struct ggml_tensor * dst,
+    const enum ggml_type type,
+    const int64_t num_rows_per_vec_dot,
+    const int64_t ir0_start,
+    const int64_t ir0_end,
+    const int64_t ir1_start,
+    const int64_t ir1_end,
+    const int64_t ith2) {
+
+    const struct ggml_tensor * src0 = dst->src[0];
+    const struct ggml_tensor * src1 = dst->src[1];
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+
+    const bool src1_cont = ggml_is_contiguous(src1);
+
+    ggml_vec_dot_t const vec_dot      = type_traits_cpu[type].vec_dot;
+    enum ggml_type const vec_dot_type = type_traits_cpu[type].vec_dot_type;
+
+    if (ir0_start >= ir0_end || ir1_start >= ir1_end) {
+    return;
+    }
+
+    const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
+    const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+
+    // block-tiling attempt
+    const int64_t blck_0 = 16;
+    const int64_t blck_1 = 16;
+
+    const size_t src1_col_stride = src1_cont || src1->type != vec_dot_type ? row_size : nb11;
+
+    // attempt to reduce false-sharing (does not seem to make a difference)
+    // 16 * 2, accounting for mmla kernels
+    float tmp[32];
+
+    for (int64_t iir1 = ir1_start; iir1<ir1_end; iir1 +=blck_1) {
+        for (int64_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0)
+        {
+           for (int64_t ir1 = iir1; ir1 < iir1 + blck_1 && ir1 < ir1_end; ir1 += num_rows_per_vec_dot) {
+            const char * src0_row = (const char*)(src0->data + ir1*nb01);
+            float * dst_col = (float*) ((char* )dst->data + ith2*nb2+ir1*nb1);
+
+            const char* src1_col = (const char*) wdata + 
+            (src1_cont || src1->type != vec_dot_type
+                ? (ith2*ne11)*row_size
+                : (ith2 * nb12));
+
+            for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
+                    vec_dot(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0), src0_row , (num_rows_per_vec_dot > 1 ? nb01 : 0), src1_col+(ir0*nb11), (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                }
+
+            for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
+                    memcpy(&dst_col[iir0 + cn * nb1 / nb0], tmp + (cn * 16), (MIN(iir0 + blck_0, ir0_end) - iir0) * sizeof(float));
+                }
+           }
+        }
+    }
+}
+
+static void ggml_compute_forward_mul_mat_hadamard(struct ggml_compute_params* params,struct ggml_tensor *dst)
+{
+    const struct ggml_tensor * src0 = dst->src[0];
+    const struct ggml_tensor * src1 = dst->src[1];
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    enum ggml_type           const vec_dot_type         = type_traits_cpu[src0->type].vec_dot_type;
+    ggml_from_float_t        const from_float           = type_traits_cpu[vec_dot_type].from_float;
+    int64_t                  const vec_dot_num_rows     = type_traits_cpu[src0->type].nrows;
+
+
+    
+    // we don't support permuted src0 or src1
+    GGML_ASSERT(nb00 == ggml_type_size(src0->type));
+    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
+    // we don't support permuted src0 or src1
+    GGML_ASSERT(nb00 == ggml_type_size(src0->type));
+    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
+
+    // dst cannot be transposed or permuted
+    GGML_ASSERT(nb0 == sizeof(float));
+    GGML_ASSERT(nb0 <= nb1);
+    GGML_ASSERT(nb1 <= nb2);
+    GGML_ASSERT(nb2 <= nb3);
+
+#if GGML_USE_LLAMAFILE
+    // broadcast factors
+    const int64_t r2 = ne12 / ne02;
+    const int64_t r3 = ne13 / ne03;
+
+    const bool src1_cont = ggml_is_contiguous(src1);
+
+    if (src1_cont) {
+        for (int64_t i13 = 0; i13 < ne13; i13++)
+            for (int64_t i12 = 0; i12 < ne12; i12++)
+                if (!llamafile_sgemm(params,
+                                     ne01, ne11, ne00/ggml_blck_size(src0->type),
+                                     (const char *)src0->data + i12/r2*nb02 + i13/r3*nb03,
+                                     nb01/ggml_type_size(src0->type),
+                                     (const char *)src1->data + i12*nb12 + i13*nb13,
+                                     nb11/ggml_type_size(src1->type),
+                                     (char *)dst->data + i12*nb2 + i13*nb3,
+                                     nb1/ggml_type_size(dst->type),
+                                     src0->type,
+                                     src1->type,
+                                     dst->type))
+                    goto UseGgmlGemm1;
+        return;
+    }
+UseGgmlGemm1:;
+#endif
+
+    if (src1->type != vec_dot_type) {
+        char * wdata = params->wdata;
+
+        const size_t nbw0 = ggml_type_size(vec_dot_type);
+        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
+        const size_t nbw2 = nbw1*ne11;
+        const size_t nbw3 = nbw2*ne12;
+
+        assert(params->wsize >= ne13*nbw3);
+        GGML_ASSERT(src1->type == GGML_TYPE_F32);
+
+    #if 0
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = 0; i12 < ne12; ++i12) {
+                for (int64_t i11 = ith; i11 < ne11; i11 += nth) {
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
+                                (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
+                                ne10);
+                }
+            }
+        }
+    #else
+        for (int64_t i13 = 0; i13 < ne13; ++i13) { // Activation을 data type의 맞게 Quantization 하는 함수
+            for (int64_t i12 = 0; i12 < ne12; ++i12) {
+                for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                    size_t bs = ggml_blck_size(vec_dot_type);
+                    int64_t ne10_block_start = (ith * ne10/bs) / nth;
+                    int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                               (ne10_block_end - ne10_block_start) * bs);
+                }
+            }
+        }
+    #endif
+    }
+
+    if (ith == 0) {
+        // Every thread starts at ith, so the first unprocessed chunk is nth.  This save a bit of coordination right at the start.
+        atomic_store_explicit(&params->threadpool->current_chunk, nth, memory_order_relaxed);
+    }
+    ggml_barrier(params->threadpool);
+
+#if GGML_USE_LLAMAFILE
+    if (src1->type != vec_dot_type) {
+        const void* wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
+        const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+
+        for (int64_t i13 = 0; i13 < ne13; i13++)
+            for (int64_t i12 = 0; i12 < ne12; i12++)
+                if (!llamafile_sgemm(params,
+                                     ne01, ne11, ne00/ggml_blck_size(src0->type),
+                                     (const char *)src0->data + i12/r2*nb02 + i13/r3*nb03,
+                                     nb01/ggml_type_size(src0->type),
+                                     (const char *)wdata + (i12*ne11 + i13*ne12*ne11)*row_size,
+                                     row_size/ggml_type_size(vec_dot_type),
+                                     (char *)dst->data + i12*nb2 + i13*nb3,
+                                     nb1/ggml_type_size(dst->type),
+                                     src0->type,
+                                     vec_dot_type,
+                                     dst->type))
+                    goto UseGgmlGemm2;
+        return;
+    }
+UseGgmlGemm2:;
+#endif
+// Activation Quantization 하는 부분 마무리
+const int64_t nr2 = ne12*ne13; // Number of Matrixes in src1
+
+const int64_t nr1 = ne1;
+const int64_t nr0 = ne0;
+
+// const group_index= ith/group_size;
+// const group_index = ith % group_size;
+
+
+int chunk_size = 16;
+
+if (nr0 == 1 || nr1 == 1) {
+        chunk_size = 64;
+    }
+
+
+int64_t nchunk0 = (nr0 + chunk_size - 1) / chunk_size;
+int64_t nchunk1 = (nr1 + chunk_size - 1) / chunk_size;
+int64_t nchunk2 = nr2;
+
+
+
+
+
+
+const int64_t dr2 = (nth + nchunk2 - 1) / nchunk2; // 각 Matrix에 몇개의 thread를 사용할 수 있는지에 관한 값
+
+
+// If the chunking is poor for the number of threads on this setup, scrap the whole plan.  Re-chunk it by thread.
+//   Also, chunking by thread was measured to have perform better on NUMA systems.  See https://github.com/ggml-org/llama.cpp/pull/6915
+//   In theory, chunking should be just as useful on NUMA and non NUMA systems, but testing disagreed with that.
+if (nchunk0 * nchunk1 * nchunk2 < nth * 4 || ggml_is_numa()) {
+    // distribute the thread work across the inner or outer loop based on which one is larger
+    nchunk0 = nr0 > nr1 ? dr2 : 1; // parallelize by src0 rows
+    nchunk1 = nr0 > nr1 ? 1 : dr2; // parallelize by src1 rows
+}
+
+// The number of elements in each chunk (각 chunk의 크기)
+const int64_t dr0 = (nr0 + nchunk0 - 1) / nchunk0;
+const int64_t dr1 = (nr1 + nchunk1 - 1) / nchunk1;
+int current_chunk = ith;
+
+while (current_chunk < nchunk0 * nchunk1 * nchunk2 )
+{
+    const int64_t ith2 = current_chunk % nchunk2;
+    const int64_t ith0 = current_chunk / nchunk2 % nchunk0;
+    const int64_t ith1 = current_chunk / nchunk2 / nchunk0;
+
+    const int64_t ir0_start = dr0 * ith0;
+    const int64_t ir0_end = MIN(ir0_start+dr0,nr0);
+
+    const int64_t ir1_start = dr1 * ith1;
+    const int64_t ir1_end = MIN(ir1_start+dr1,nr1);
+
+    // dot kernels can handle 1 row and col at a time, but mmla kernels can process 2 rows and cols
+    int64_t num_rows_per_vec_dot = vec_dot_num_rows;
+
+    // these checks are needed to avoid crossing dim1 boundaries
+    // can be optimized, but the logic would become more complicated, so keeping it like this for simplicity
+    if ((nr0 % 2 != 0) || (ne11 % 2 != 0) || ((ir0_end - ir0_start) % 2 != 0) || ((ir1_end - ir1_start) % 2 != 0)) {
+        num_rows_per_vec_dot = 1;
+    }
+
+    ggml_compute_forward_mul_mat_hadamard_one_chunk(params,dst,src0->type,num_rows_per_vec_dot,ir0_start,ir0_end,ir1_start,ir1_end,ith2);
+    if (nth >= nchunk0 * nchunk1 * nchunk2) {
+            break;
+    }
+
+    current_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
+}
+
+}
+
+
 /////////////////////////////////
 
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
@@ -2200,6 +2460,11 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                 ggml_compute_forward_hadamard_transform(params,tensor);
             }
             break;
+        case GGML_OP_MUL_MAT_HADAMARD:
+            {
+                ggml_compute_forward_mul_mat_hadamard(params,tensor);
+            }
+            break;
         case GGML_OP_NONE:
             {
                 // nop
@@ -2371,6 +2636,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 n_tasks = n_threads;
             } break;
         case GGML_OP_HADAMARD:
+        case GGML_OP_MUL_MAT_HADAMARD:
             {
                 n_tasks = n_threads;
             } break;
@@ -2894,6 +3160,14 @@ struct ggml_cplan ggml_graph_plan(
                 case GGML_OP_HADAMARD:
                     {   
                         cur=ggml_row_size(node->type, node->ne[0])*node->ne[1]*node->ne[2]*node->ne[3];
+                    } break;
+                case GGML_OP_MUL_MAT_HADAMARD:
+                    {
+                        const enum ggml_type vec_dot_type = type_traits_cpu[node->src[0]->type].vec_dot_type;
+
+                        if (node->src[1]->type != vec_dot_type) {
+                            cur = ggml_row_size(vec_dot_type, ggml_nelements(node->src[1]));
+                        }
                     } break;
                 case GGML_OP_OUT_PROD:
                     {
