@@ -818,6 +818,8 @@ static float make_qkx3_quants(int n, int nmax, const float * GGML_RESTRICT x, co
     return scale;
 }
 
+        
+
 static float make_qp_quants(int n, int nmax, const float * GGML_RESTRICT x, uint8_t * GGML_RESTRICT L, const float * quant_weights) {
     float max = 0;
     for (int i = 0; i < n; ++i) {
